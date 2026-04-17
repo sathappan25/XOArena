@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
+  type BoardSize,
   calculateWinner,
   getAiMove,
   getWinningLine,
@@ -30,7 +31,10 @@ type Theme = 'light' | 'dark' | 'crimson'
 
 const HUMAN_MARK = 'X'
 const AI_MARK = 'O'
-const EMPTY_BOARD: Cell[] = Array(9).fill(null)
+const DEFAULT_BOARD_SIZE: BoardSize = 3
+const MOVE_TIME_LIMIT_SECONDS = 10
+
+const createEmptyBoard = (boardSize: BoardSize): Cell[] => Array(boardSize * boardSize).fill(null)
 
 type ScoreState = {
   wins: number
@@ -74,6 +78,28 @@ const difficultyOptions: Array<{
   },
 ]
 
+const boardSizeOptions: Array<{
+  value: BoardSize
+  label: string
+  hint: string
+}> = [
+  {
+    value: 3,
+    label: '3 x 3',
+    hint: 'Classic quick match.',
+  },
+  {
+    value: 4,
+    label: '4 x 4',
+    hint: 'More space, longer tactics.',
+  },
+  {
+    value: 5,
+    label: '5 x 5',
+    hint: 'Extended strategy arena.',
+  },
+]
+
 const themeOptions: Array<{
   value: Theme
   label: string
@@ -100,8 +126,11 @@ function App() {
   const [view, setView] = useState<View>('landing')
   const [theme, setTheme] = useState<Theme>('light')
   const [difficulty, setDifficulty] = useState<Difficulty>('easy')
-  const [board, setBoard] = useState<Cell[]>([...EMPTY_BOARD])
+  const [boardSize, setBoardSize] = useState<BoardSize>(DEFAULT_BOARD_SIZE)
+  const [board, setBoard] = useState<Cell[]>(() => createEmptyBoard(DEFAULT_BOARD_SIZE))
   const [isHumanTurn, setIsHumanTurn] = useState(true)
+  const [moveTimeLeft, setMoveTimeLeft] = useState(MOVE_TIME_LIMIT_SECONDS)
+  const [timedOutTurn, setTimedOutTurn] = useState<'human' | 'ai' | null>(null)
   const [score, dispatchScore] = useReducer(scoreReducer, {
     wins: 0,
     losses: 0,
@@ -109,15 +138,55 @@ function App() {
   })
   const lastOutcomeRef = useRef('')
 
-  const winner = useMemo(() => calculateWinner(board), [board])
-  const winningLine = useMemo(() => getWinningLine(board), [board])
-  const isDraw = useMemo(() => !winner && isBoardFull(board), [board, winner])
-  const gameOver = Boolean(winner) || isDraw
+  const winner = useMemo(() => calculateWinner(board, boardSize), [board, boardSize])
+  const timeoutWinner = useMemo(() => {
+    if (!timedOutTurn) {
+      return null
+    }
+
+    return timedOutTurn === 'human' ? AI_MARK : HUMAN_MARK
+  }, [timedOutTurn])
+  const effectiveWinner = winner ?? timeoutWinner
+  const winningLine = useMemo(
+    () => (winner ? getWinningLine(board, boardSize) : null),
+    [board, boardSize, winner],
+  )
+  const isDraw = useMemo(() => !effectiveWinner && isBoardFull(board), [board, effectiveWinner])
+  const gameOver = Boolean(effectiveWinner) || isDraw
   const boardSignature = useMemo(
     () => board.map((cell) => cell ?? '-').join(''),
     [board],
   )
   const isAiThinking = view === 'arena' && !isHumanTurn && !gameOver
+
+  const decisiveRounds = useMemo(() => score.wins + score.losses, [score.losses, score.wins])
+  const totalRounds = useMemo(
+    () => score.wins + score.losses + score.draws,
+    [score.draws, score.losses, score.wins],
+  )
+  const playerWinRate = useMemo(
+    () => (decisiveRounds > 0 ? (score.wins / decisiveRounds) * 100 : 0),
+    [decisiveRounds, score.wins],
+  )
+  const aiWinRate = useMemo(
+    () => (decisiveRounds > 0 ? (score.losses / decisiveRounds) * 100 : 0),
+    [decisiveRounds, score.losses],
+  )
+  const winLeader = useMemo(() => {
+    if (decisiveRounds === 0) {
+      return 'none'
+    }
+
+    if (Math.abs(playerWinRate - aiWinRate) < Number.EPSILON) {
+      return 'tie'
+    }
+
+    return playerWinRate > aiWinRate ? 'player' : 'ai'
+  }, [aiWinRate, decisiveRounds, playerWinRate])
+  const timerProgress = useMemo(
+    () => Math.max((moveTimeLeft / MOVE_TIME_LIMIT_SECONDS) * 100, 0),
+    [moveTimeLeft],
+  )
 
   useEffect(() => {
     if (view !== 'arena' || !gameOver) {
@@ -125,7 +194,11 @@ function App() {
       return
     }
 
-    const outcomeKey = winner ? `winner-${winner}-${boardSignature}` : `draw-${boardSignature}`
+    const outcomeKey = timedOutTurn
+      ? `timeout-${timedOutTurn}-${boardSize}-${boardSignature}`
+      : effectiveWinner
+        ? `winner-${effectiveWinner}-${boardSize}-${boardSignature}`
+        : `draw-${boardSize}-${boardSignature}`
 
     if (lastOutcomeRef.current === outcomeKey) {
       return
@@ -133,7 +206,7 @@ function App() {
 
     lastOutcomeRef.current = outcomeKey
 
-    if (winner === HUMAN_MARK) {
+    if (effectiveWinner === HUMAN_MARK) {
       dispatchScore('win')
       void confetti({
         particleCount: 120,
@@ -144,13 +217,13 @@ function App() {
       return
     }
 
-    if (winner === AI_MARK) {
+    if (effectiveWinner === AI_MARK) {
       dispatchScore('loss')
       return
     }
 
     dispatchScore('draw')
-  }, [boardSignature, gameOver, view, winner])
+  }, [boardSignature, boardSize, effectiveWinner, gameOver, timedOutTurn, view])
 
   useEffect(() => {
     if (!isAiThinking) {
@@ -159,7 +232,7 @@ function App() {
 
     const timeoutId = window.setTimeout(() => {
       setBoard((currentBoard) => {
-        const moveIndex = getAiMove(currentBoard, difficulty, AI_MARK, HUMAN_MARK)
+        const moveIndex = getAiMove(currentBoard, difficulty, AI_MARK, HUMAN_MARK, boardSize)
 
         if (moveIndex < 0 || currentBoard[moveIndex] !== null) {
           return currentBoard
@@ -175,7 +248,31 @@ function App() {
     return () => {
       window.clearTimeout(timeoutId)
     }
-  }, [difficulty, isAiThinking])
+  }, [boardSize, difficulty, isAiThinking])
+
+  useEffect(() => {
+    if (view !== 'arena' || gameOver) {
+      return
+    }
+
+    setMoveTimeLeft(MOVE_TIME_LIMIT_SECONDS)
+
+    const intervalId = window.setInterval(() => {
+      setMoveTimeLeft((currentValue) => Math.max(currentValue - 1, 0))
+    }, 1000)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [gameOver, isHumanTurn, view])
+
+  useEffect(() => {
+    if (view !== 'arena' || gameOver || moveTimeLeft > 0) {
+      return
+    }
+
+    setTimedOutTurn(isHumanTurn ? 'human' : 'ai')
+  }, [gameOver, isHumanTurn, moveTimeLeft, view])
 
   const currentDifficulty = useMemo(
     () => difficultyOptions.find((option) => option.value === difficulty),
@@ -183,14 +280,28 @@ function App() {
   )
 
   const status = useMemo(() => {
-    if (winner === HUMAN_MARK) {
+    if (timedOutTurn === 'human') {
+      return {
+        title: 'Time up! AI wins this round.',
+        subtitle: 'Your 10-second move window expired. Restart to try again.',
+      }
+    }
+
+    if (timedOutTurn === 'ai') {
+      return {
+        title: 'AI timed out. You win this round!',
+        subtitle: 'The AI ran out of the 10-second move window.',
+      }
+    }
+
+    if (effectiveWinner === HUMAN_MARK) {
       return {
         title: 'Congrats! You won this round.',
         subtitle: 'Perfect callouts and timing. Ready for the next battle?',
       }
     }
 
-    if (winner === AI_MARK) {
+    if (effectiveWinner === AI_MARK) {
       return {
         title: 'Try again!',
         subtitle: 'The AI took this one. Shift strategy and rematch.',
@@ -215,11 +326,29 @@ function App() {
       title: 'AI is thinking...',
       subtitle: `${currentDifficulty?.label ?? 'Current'} mode is calculating the best move.`,
     }
-  }, [currentDifficulty?.label, isDraw, isHumanTurn, winner])
+  }, [currentDifficulty?.label, effectiveWinner, isDraw, isHumanTurn, timedOutTurn])
 
-  const startNewRound = () => {
-    setBoard([...EMPTY_BOARD])
+  const leaderMessage = useMemo(() => {
+    if (winLeader === 'none') {
+      return 'No decisive rounds yet. Complete a few games to compare win rates.'
+    }
+
+    if (winLeader === 'tie') {
+      return `It is tied at ${playerWinRate.toFixed(1)}% each.`
+    }
+
+    if (winLeader === 'player') {
+      return `Player leads by ${(playerWinRate - aiWinRate).toFixed(1)} percentage points.`
+    }
+
+    return `AI leads by ${(aiWinRate - playerWinRate).toFixed(1)} percentage points.`
+  }, [aiWinRate, playerWinRate, winLeader])
+
+  const startNewRound = (nextBoardSize: BoardSize = boardSize) => {
+    setBoard(createEmptyBoard(nextBoardSize))
     setIsHumanTurn(true)
+    setTimedOutTurn(null)
+    setMoveTimeLeft(MOVE_TIME_LIMIT_SECONDS)
     lastOutcomeRef.current = ''
   }
 
@@ -231,6 +360,11 @@ function App() {
   const handleDifficultySelect = (nextDifficulty: Difficulty) => {
     setDifficulty(nextDifficulty)
     startNewRound()
+  }
+
+  const handleBoardSizeSelect = (nextBoardSize: BoardSize) => {
+    setBoardSize(nextBoardSize)
+    startNewRound(nextBoardSize)
   }
 
   const handleCellClick = (index: number) => {
@@ -326,10 +460,10 @@ function App() {
                   <Target size={16} /> Three AI levels
                 </span>
                 <span>
-                  <Palette size={16} /> Three live themes
+                  <Target size={16} /> Board size up to 5 x 5
                 </span>
                 <span>
-                  <Trophy size={16} /> Round score tracking
+                  <Trophy size={16} /> Live stats dashboard
                 </span>
               </motion.div>
 
@@ -365,7 +499,7 @@ function App() {
                 <button type="button" className="ghost-button" onClick={() => setView('landing')}>
                   <Home size={16} /> Home
                 </button>
-                <button type="button" className="ghost-button" onClick={startNewRound}>
+                <button type="button" className="ghost-button" onClick={() => startNewRound()}>
                   <RefreshCcw size={16} /> Restart Round
                 </button>
               </div>
@@ -384,6 +518,24 @@ function App() {
                       className={`difficulty-button ${difficulty === option.value ? 'active' : ''}`}
                       onClick={() => handleDifficultySelect(option.value)}
                       aria-pressed={difficulty === option.value}
+                    >
+                      <span>{option.label}</span>
+                      <small>{option.hint}</small>
+                    </button>
+                  ))}
+                </div>
+
+                <h3>
+                  <Target size={18} /> Grid Size
+                </h3>
+                <div className="grid-size-controls" role="group" aria-label="Select board size">
+                  {boardSizeOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`size-button ${boardSize === option.value ? 'active' : ''}`}
+                      onClick={() => handleBoardSizeSelect(option.value)}
+                      aria-pressed={boardSize === option.value}
                     >
                       <span>{option.label}</span>
                       <small>{option.hint}</small>
@@ -423,10 +575,32 @@ function App() {
                     <span>Draws: {score.draws}</span>
                   </div>
                 </div>
+
+                <div className="stats-dashboard" aria-label="Game stats dashboard">
+                  <h3>
+                    <Trophy size={18} /> Game Stats Dashboard
+                  </h3>
+                  <div className="stats-grid">
+                    <article className={`stat-card ${winLeader === 'player' ? 'leader' : ''}`}>
+                      <p>Player Win %</p>
+                      <strong>{playerWinRate.toFixed(1)}%</strong>
+                      <small>{score.wins} wins</small>
+                    </article>
+                    <article className={`stat-card ${winLeader === 'ai' ? 'leader' : ''}`}>
+                      <p>AI Win %</p>
+                      <strong>{aiWinRate.toFixed(1)}%</strong>
+                      <small>{score.losses} wins</small>
+                    </article>
+                  </div>
+                  <p className="stats-note">{leaderMessage}</p>
+                  <p className="stats-note subtle">
+                    Decisive rounds: {decisiveRounds} · Total rounds: {totalRounds}
+                  </p>
+                </div>
               </aside>
 
               <main className="panel board-panel">
-                <div className={`status-card ${winner === HUMAN_MARK ? 'win' : ''} ${winner === AI_MARK ? 'lose' : ''}`}>
+                <div className={`status-card ${effectiveWinner === HUMAN_MARK ? 'win' : ''} ${effectiveWinner === AI_MARK ? 'lose' : ''}`}>
                   <h3>{status.title}</h3>
                   <p>{status.subtitle}</p>
                 </div>
@@ -440,7 +614,36 @@ function App() {
                   </span>
                 </div>
 
-                <div className="board" role="grid" aria-label="Tic tac toe board">
+                <div className={`move-timer ${moveTimeLeft <= 3 && !gameOver ? 'danger' : ''}`}>
+                  <div className="timer-head">
+                    <span>{isHumanTurn ? 'Player' : 'AI'} move timer</span>
+                    <strong>{moveTimeLeft}s</strong>
+                  </div>
+                  <div
+                    className="timer-track"
+                    role="progressbar"
+                    aria-label="Move timer"
+                    aria-valuemin={0}
+                    aria-valuemax={MOVE_TIME_LIMIT_SECONDS}
+                    aria-valuenow={moveTimeLeft}
+                  >
+                    <motion.div
+                      className="timer-fill"
+                      initial={false}
+                      animate={{ width: `${timerProgress}%` }}
+                      transition={{ duration: 0.2, ease: 'linear' }}
+                    />
+                  </div>
+                </div>
+
+                <div
+                  className={`board board-${boardSize}`}
+                  style={{
+                    gridTemplateColumns: `repeat(${boardSize}, minmax(58px, 1fr))`,
+                  }}
+                  role="grid"
+                  aria-label={`${boardSize} by ${boardSize} tic tac toe board`}
+                >
                   {board.map((cell, index) => (
                     <button
                       key={index}
@@ -448,7 +651,7 @@ function App() {
                       className={`cell ${winningLine?.includes(index) ? 'winning' : ''}`}
                       onClick={() => handleCellClick(index)}
                       disabled={cell !== null || !isHumanTurn || gameOver || isAiThinking}
-                      aria-label={`Cell ${index + 1}${cell ? `, ${cell}` : ''}`}
+                      aria-label={`Row ${Math.floor(index / boardSize) + 1}, Column ${(index % boardSize) + 1}${cell ? `, ${cell}` : ''}`}
                     >
                       <AnimatePresence mode="wait">
                         {cell && (
@@ -469,7 +672,7 @@ function App() {
                 </div>
 
                 <div className="action-row">
-                  <button type="button" className="primary-button" onClick={startNewRound}>
+                  <button type="button" className="primary-button" onClick={() => startNewRound()}>
                     <RefreshCcw size={16} /> Play Again
                   </button>
                 </div>
